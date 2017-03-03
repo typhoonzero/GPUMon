@@ -1,0 +1,36 @@
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: gpumon
+  labels:
+    kubernetes.io/cluster-service: "true"
+  namespace: kube-system
+spec:
+  template:
+    metadata:
+      labels:
+        app: gpumon
+    spec:
+      nodeSelector:
+        gpu: "y"
+      containers:
+      - name: gpumon
+        securityContext:
+          privileged: true
+        image: typhoon1986/gpumon
+        env:
+        - name: INFLUXDB_ADDR
+          value: http://monitoring-influxdb:8086/
+        volumeMounts:
+          - mountPath: /usr/bin/nvidia-smi
+            name: nvidia-smi
+          - mountPath: /usr/lib64
+            name: nvidia-libs
+      volumes:
+      # FIXME: must mount nvidia-smi binary and nvidia libs
+      - name: nvidia-smi
+        hostPath:
+          path: /usr/bin/nvidia-smi
+      - name: nvidia-libs
+        hostPath:
+          path: /home/wuyi/myhostpath/lib64
