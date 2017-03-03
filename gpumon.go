@@ -1,9 +1,11 @@
 package main // GPU Monitor, feed data to influxdb
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	urlquery "net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -87,7 +89,7 @@ func utilization2Float(utilization string) int64 {
 }
 
 func getGPUInfo() (*NvidiaSmiLog, error) {
-	out, err := exec.Command("nvidia-smi -q -x").Output()
+	out, err := exec.Command("nvidia-smi", "-q", "-x").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -111,11 +113,33 @@ func getURL(url string) (int, string) {
 		glog.Errorf("parse url response error: %v", err)
 		return -1, ""
 	}
+	glog.Infof("got response %s", body)
 	return resp.StatusCode, string(body)
+}
+
+func postURL(url string, plainpost string) {
+	glog.Infof("posting: %s", plainpost)
+	resp, err := http.Post(url, "plain/text", strings.NewReader(plainpost))
+	if err != nil {
+		glog.Errorf("post error: %s", err)
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		glog.Errorf("error read response %s", err)
+	}
+	glog.Infof("response status[%d] %s", resp.StatusCode, body)
+}
+
+func appendPoint(output *bytes.Buffer, mesurement string, tags string, value int64, timestamp int64) {
+	if output.Len() > 0 {
+		output.WriteString("\n")
+	}
+	output.WriteString(fmt.Sprintf("%s,%s value=%d %d", mesurement, tags, value, timestamp))
 }
 
 func postToInfluxdb(xmlinfo *NvidiaSmiLog, baseurl string, hostname string, timestamp int64) {
 	//create dababase if not exist
+	var postbuffer bytes.Buffer
 	url := baseurl + "query?q=CREATE%20DATABASE%20GPU"
 	code, body := getURL(url)
 	if code != 200 {
@@ -123,61 +147,37 @@ func postToInfluxdb(xmlinfo *NvidiaSmiLog, baseurl string, hostname string, time
 	}
 	writeurl := baseurl + "write?db=GPU"
 	for _, gpustat := range xmlinfo.GPUInfoList {
-		//-------------------------------------- FB --------------------------------------
-		// FB memory total
-		args := fmt.Sprintf("fbmemory/total,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, memUsage2Int(gpustat.FBMemoryUsage.Total), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-		// FB memory used
-		args = fmt.Sprintf("fbmemory/used,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, memUsage2Int(gpustat.FBMemoryUsage.Used), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-		// FB memroy free
-		args = fmt.Sprintf("fbmemory/free,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, memUsage2Int(gpustat.FBMemoryUsage.Free), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-		//-------------------------------------- Bar1 --------------------------------------
-		// Bar1 memory total
-		args = fmt.Sprintf("bar1memory/total,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, memUsage2Int(gpustat.Bar1MemoryUsage.Total), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-		// Bar1 memory used
-		args = fmt.Sprintf("bar1memory/used,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, memUsage2Int(gpustat.Bar1MemoryUsage.Used), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-		// Bar1 memory free
-		args = fmt.Sprintf("bar1memory/free,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, memUsage2Int(gpustat.Bar1MemoryUsage.Free), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-
-		//-------------------------------------- Utilization --------------------------------------
-		// GPU Utilization
-		args = fmt.Sprintf("gpu,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, utilization2Float(gpustat.Utilization.GPUUtil), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-		// FIXME: memory util not needed?
-		// GPU Encoder
-		args = fmt.Sprintf("gpu/encoder,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, utilization2Float(gpustat.Utilization.EncoderUtil), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-		// GPU Decoder
-		args = fmt.Sprintf("gpu/decoder,hostname=%s,gpuid=%s,product=%s,minor=%d value=%d %d",
-			hostname, gpustat.ID, gpustat.ProductName, gpustat.MinorNumber, utilization2Float(gpustat.Utilization.DecoderUtil), timestamp)
-		http.Post(writeurl, "plain/text", strings.NewReader(args))
-
+		postbuffer.Reset()
+		tags := fmt.Sprintf("hostname=%s,gpuid=%s,product=%s,minor=%d",
+			hostname, gpustat.ID, urlquery.QueryEscape(gpustat.ProductName), gpustat.MinorNumber)
+		// FB
+		appendPoint(&postbuffer, "fbmemory/total", tags, memUsage2Int(gpustat.FBMemoryUsage.Total), timestamp)
+		appendPoint(&postbuffer, "fbmemory/used", tags, memUsage2Int(gpustat.FBMemoryUsage.Used), timestamp)
+		appendPoint(&postbuffer, "fbmemory/free", tags, memUsage2Int(gpustat.FBMemoryUsage.Free), timestamp)
+		// BAR1
+		appendPoint(&postbuffer, "bar1memory/total", tags, memUsage2Int(gpustat.Bar1MemoryUsage.Total), timestamp)
+		appendPoint(&postbuffer, "bar1memory/used", tags, memUsage2Int(gpustat.Bar1MemoryUsage.Used), timestamp)
+		appendPoint(&postbuffer, "bar1memory/free", tags, memUsage2Int(gpustat.Bar1MemoryUsage.Free), timestamp)
+		// Utilizations
+		appendPoint(&postbuffer, "gpu", tags, utilization2Float(gpustat.Utilization.GPUUtil), timestamp)
+		appendPoint(&postbuffer, "gpu/encoder", tags, utilization2Float(gpustat.Utilization.EncoderUtil), timestamp)
+		appendPoint(&postbuffer, "gpu/decoder", tags, utilization2Float(gpustat.Utilization.DecoderUtil), timestamp)
+		// Post these points to influxdb
+		postURL(writeurl, postbuffer.String())
 	}
 
 }
 
 func main() {
 	hostname, _ := os.Hostname()
-	timestamp := time.Now().Unix() * 1000 * 1000
+	influxdbAddr := os.Getenv("INFLUXDB_ADDR")
 	for {
+		timestamp := time.Now().UnixNano()
 		infos, err := getGPUInfo()
 		if err != nil {
 			glog.Errorf("get GPU info error: %v", err)
 		}
-		postToInfluxdb(infos, "http://monitoring-influxdb:8086/", hostname, timestamp)
+		postToInfluxdb(infos, influxdbAddr, hostname, timestamp)
 		time.Sleep(5 * time.Second)
 	}
 
