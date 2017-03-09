@@ -2,6 +2,7 @@ package main // GPU Monitor, feed data to influxdb
 import (
 	"bytes"
 	"encoding/xml"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -171,6 +172,7 @@ func postToInfluxdb(xmlinfo *NvidiaSmiLog, baseurl string, hostname string, time
 func main() {
 	hostname, _ := os.Hostname()
 	influxdbAddr := os.Getenv("INFLUXDB_ADDR")
+	flag.Parse()
 	for {
 		timestamp := time.Now().UnixNano()
 		infos, err := getGPUInfo()
